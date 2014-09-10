@@ -1,6 +1,6 @@
 /*
  * H.265 video codec.
- * Copyright (c) 2013 StrukturAG, Dirk Farin, <farin@struktur.de>
+ * Copyright (c) 2013-2014 struktur AG, Dirk Farin <farin@struktur.de>
  *
  * This file is part of libde265.
  *
@@ -36,12 +36,13 @@ typedef struct {
 
 
 typedef struct {
-  int state;
-  int MPSbit;
+  uint8_t MPSbit : 1;
+  uint8_t state  : 7;
 } context_model;
 
 
 void init_CABAC_decoder(CABAC_decoder* decoder, uint8_t* bitstream, int length);
+void init_CABAC_decoder_2(CABAC_decoder* decoder);
 int  decode_CABAC_bit(CABAC_decoder* decoder, context_model* model);
 int  decode_CABAC_TU(CABAC_decoder* decoder, int cMax, context_model* model);
 int  decode_CABAC_term_bit(CABAC_decoder* decoder);

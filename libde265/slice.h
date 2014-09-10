@@ -1,6 +1,9 @@
 /*
  * H.265 video codec.
- * Copyright (c) 2013 StrukturAG, Dirk Farin, <farin@struktur.de>
+ * Copyright (c) 2013-2014 struktur AG, Dirk Farin <farin@struktur.de>
+ *
+ * Authors: struktur AG, Dirk Farin <farin@struktur.de>
+ *          Min Chen <chenm003@163.com>
  *
  * This file is part of libde265.
  *
@@ -22,12 +25,41 @@
 #define DE265_SLICE_H
 
 #include "libde265/cabac.h"
+#include "libde265/de265.h"
+#include "libde265/util.h"
+#include "libde265/refpic.h"
+#include "libde265/threads.h"
 
+#include <vector>
+
+#define MAX_NUM_REF_PICS    16
 
 #define SLICE_TYPE_B 0
 #define SLICE_TYPE_P 1
 #define SLICE_TYPE_I 2
 
+
+/*
+        2Nx2N           2NxN             Nx2N            NxN          
+      +-------+       +-------+       +---+---+       +---+---+
+      |       |       |       |       |   |   |       |   |   |
+      |       |       |_______|       |   |   |       |___|___|
+      |       |       |       |       |   |   |       |   |   |
+      |       |       |       |       |   |   |       |   |   |
+      +-------+       +-------+       +---+---+       +---+---+
+
+        2NxnU           2NxnD           nLx2N           nRx2N        
+      +-------+       +-------+       +-+-----+       +-----+-+
+      |_______|       |       |       | |     |       |     | |
+      |       |       |       |       | |     |       |     | |
+      |       |       |_______|       | |     |       |     | |
+      |       |       |       |       | |     |       |     | |
+      +-------+       +-------+       +-+-----+       +-----+-+
+
+      - AMP only if CU size > min CU size -> minimum PU size = CUsize/2
+      - NxN only if size >= 16x16 (-> minimum block size = 8x8)
+      - minimum block size for Bi-Pred is 8x8 (wikipedia: Coding_tree_unit)
+*/
 enum PartMode
   {
     PART_2Nx2N = 0,
@@ -35,7 +67,7 @@ enum PartMode
     PART_Nx2N  = 2,
     PART_NxN   = 3,
     PART_2NxnU = 4,
-    PART_2NXnD = 5,
+    PART_2NxnD = 5,
     PART_nLx2N = 6,
     PART_nRx2N = 7
   };
@@ -61,8 +93,53 @@ enum IntraPredMode
     INTRA_CHROMA_EQ_LUMA = 100  // chroma := luma
   };
 
-typedef struct {
-  int slice_index; // index through all slices in a picture
+enum InterPredIdc
+  {
+    PRED_L0=0,
+    PRED_L1=1,
+    PRED_BI=2
+  };
+
+enum context_model_indices {
+  CONTEXT_MODEL_SAO_MERGE_FLAG = 0,
+  CONTEXT_MODEL_SAO_TYPE_IDX   = CONTEXT_MODEL_SAO_MERGE_FLAG +1,
+  CONTEXT_MODEL_SPLIT_CU_FLAG  = CONTEXT_MODEL_SAO_TYPE_IDX + 1,
+  CONTEXT_MODEL_CU_SKIP_FLAG   = CONTEXT_MODEL_SPLIT_CU_FLAG + 3,
+  CONTEXT_MODEL_PART_MODE      = CONTEXT_MODEL_CU_SKIP_FLAG + 3,
+  CONTEXT_MODEL_PREV_INTRA_LUMA_PRED_FLAG = CONTEXT_MODEL_PART_MODE + 4,
+  CONTEXT_MODEL_INTRA_CHROMA_PRED_MODE    = CONTEXT_MODEL_PREV_INTRA_LUMA_PRED_FLAG + 1,
+  CONTEXT_MODEL_CBF_LUMA                  = CONTEXT_MODEL_INTRA_CHROMA_PRED_MODE + 1,
+  CONTEXT_MODEL_CBF_CHROMA                = CONTEXT_MODEL_CBF_LUMA + 2,
+  CONTEXT_MODEL_SPLIT_TRANSFORM_FLAG      = CONTEXT_MODEL_CBF_CHROMA + 4,
+  CONTEXT_MODEL_LAST_SIGNIFICANT_COEFFICIENT_X_PREFIX = CONTEXT_MODEL_SPLIT_TRANSFORM_FLAG + 3,
+  CONTEXT_MODEL_LAST_SIGNIFICANT_COEFFICIENT_Y_PREFIX = CONTEXT_MODEL_LAST_SIGNIFICANT_COEFFICIENT_X_PREFIX + 18,
+  CONTEXT_MODEL_CODED_SUB_BLOCK_FLAG          = CONTEXT_MODEL_LAST_SIGNIFICANT_COEFFICIENT_Y_PREFIX + 18,
+  CONTEXT_MODEL_SIGNIFICANT_COEFF_FLAG        = CONTEXT_MODEL_CODED_SUB_BLOCK_FLAG + 4,
+  CONTEXT_MODEL_COEFF_ABS_LEVEL_GREATER1_FLAG = CONTEXT_MODEL_SIGNIFICANT_COEFF_FLAG + 42,
+  CONTEXT_MODEL_COEFF_ABS_LEVEL_GREATER2_FLAG = CONTEXT_MODEL_COEFF_ABS_LEVEL_GREATER1_FLAG + 24,
+  CONTEXT_MODEL_CU_QP_DELTA_ABS        = CONTEXT_MODEL_COEFF_ABS_LEVEL_GREATER2_FLAG + 6,
+  CONTEXT_MODEL_TRANSFORM_SKIP_FLAG    = CONTEXT_MODEL_CU_QP_DELTA_ABS + 2,
+  CONTEXT_MODEL_MERGE_FLAG             = CONTEXT_MODEL_TRANSFORM_SKIP_FLAG + 2,
+  CONTEXT_MODEL_MERGE_IDX              = CONTEXT_MODEL_MERGE_FLAG + 1,
+  CONTEXT_MODEL_PRED_MODE_FLAG         = CONTEXT_MODEL_MERGE_IDX + 1,
+  CONTEXT_MODEL_ABS_MVD_GREATER01_FLAG = CONTEXT_MODEL_PRED_MODE_FLAG + 1,
+  CONTEXT_MODEL_MVP_LX_FLAG            = CONTEXT_MODEL_ABS_MVD_GREATER01_FLAG + 2,
+  CONTEXT_MODEL_RQT_ROOT_CBF           = CONTEXT_MODEL_MVP_LX_FLAG + 1,
+  CONTEXT_MODEL_REF_IDX_LX             = CONTEXT_MODEL_RQT_ROOT_CBF + 1,
+  CONTEXT_MODEL_INTER_PRED_IDC         = CONTEXT_MODEL_REF_IDX_LX + 2,
+  CONTEXT_MODEL_CU_TRANSQUANT_BYPASS_FLAG = CONTEXT_MODEL_INTER_PRED_IDC + 5,
+  CONTEXT_MODEL_TABLE_LENGTH           = CONTEXT_MODEL_CU_TRANSQUANT_BYPASS_FLAG + 1
+};
+
+
+typedef struct slice_segment_header {
+  slice_segment_header() { }
+
+  de265_error read(bitreader* br, struct decoder_context*, bool* continueDecoding);
+  void dump_slice_segment_header(const decoder_context*, int fd) const;
+
+
+  int  slice_index; // index through all slices in a picture
 
   char first_slice_segment_in_pic_flag;
   char no_output_of_prior_pics_flag;
@@ -75,33 +152,51 @@ typedef struct {
   char colour_plane_id;
   int  slice_pic_order_cnt_lsb;
   char short_term_ref_pic_set_sps_flag;
-  //short_term_ref_pic_set(num_short_term_ref_pic_sets)
+  ref_pic_set slice_ref_pic_set;
+
   int  short_term_ref_pic_set_idx;
   int  num_long_term_sps;
   int  num_long_term_pics;
 
-  //int lt_idx_sps[i];
-  //int poc_lsb_lt[i];
-  //char used_by_curr_pic_lt_flag[i];
+  uint8_t lt_idx_sps[MAX_NUM_REF_PICS];
+  int     poc_lsb_lt[MAX_NUM_REF_PICS];
+  char    used_by_curr_pic_lt_flag[MAX_NUM_REF_PICS];
 
-  //char delta_poc_msb_present_flag[i];
-  //int delta_poc_msb_cycle_lt[i];
+  char delta_poc_msb_present_flag[MAX_NUM_REF_PICS];
+  int delta_poc_msb_cycle_lt[MAX_NUM_REF_PICS];
 
   char slice_temporal_mvp_enabled_flag;
   char slice_sao_luma_flag;
   char slice_sao_chroma_flag;
 
   char num_ref_idx_active_override_flag;
-  int  num_ref_idx_l0_active;
-  int  num_ref_idx_l1_active;
+  int  num_ref_idx_l0_active; // [1;16]
+  int  num_ref_idx_l1_active; // [1;16]
 
-  //ref_pic_lists_modification()
+  char ref_pic_list_modification_flag_l0;
+  char ref_pic_list_modification_flag_l1;
+  uint8_t list_entry_l0[16];
+  uint8_t list_entry_l1[16];
+
   char mvd_l1_zero_flag;
   char cabac_init_flag;
   char collocated_from_l0_flag;
   int  collocated_ref_idx;
 
-  //pred_weight_table()
+  // --- pred_weight_table ---
+
+  uint8_t luma_log2_weight_denom; // [0;7]
+  uint8_t ChromaLog2WeightDenom;  // [0;7]
+
+  // first index is L0/L1
+  uint8_t luma_weight_flag[2][16];   // bool
+  uint8_t chroma_weight_flag[2][16]; // bool
+  int16_t LumaWeight[2][16];
+  int8_t  luma_offset[2][16];
+  int16_t ChromaWeight[2][16][2];
+  int8_t  ChromaOffset[2][16][2];
+
+
   int  five_minus_max_num_merge_cand;
   int  slice_qp_delta;
 
@@ -117,61 +212,40 @@ typedef struct {
 
   int  num_entry_point_offsets;
   int  offset_len;
-  // int entry_point_offset[i]
+  std::vector<int> entry_point_offset;
 
   int  slice_segment_header_extension_length;
 
 
   // --- derived data ---
 
-  int SliceAddrRS; // current value, this is also set into the CTB-info array in the decoder context
-
-  int CtbAddrInRS;
-  int CtbAddrInTS;
+  int SliceAddrRS;  // start of last independent slice
   int SliceQPY;
 
   int initType;
 
-  int IsCuQpDeltaCoded;
-  int CuQpDelta;
-
-  int cu_transquant_bypass_flag;
-
-  int CurrRpsIdx;
   int MaxNumMergeCand;
+  int CurrRpsIdx;
+  ref_pic_set CurrRps;  // the active reference-picture set
+  int NumPocTotalCurr;
 
+  int RefPicList[2][MAX_NUM_REF_PICS]; // contains indices into DPB
+  int RefPicList_POC[2][MAX_NUM_REF_PICS];
+  int RefPicList_PicState[2][MAX_NUM_REF_PICS]; /* We have to save the PicState because the decoding
+                                                   of an image may be delayed and the PicState can
+                                                   change in the mean-time (e.g. from ShortTerm to
+                                                   LongTerm). PicState is used in motion.cc */
 
-  // --- decoder runtime data ---
+  char LongTermRefPic[2][MAX_NUM_REF_PICS]; /* Flag whether the picture at this ref-pic-list
+                                               is a long-term picture. */
 
-  int currentQPY;
-  int lastQPYinPreviousQG;
+  // context storage for dependent slices (stores CABAC model at end of slice segment)
+  context_model ctx_model_storage[CONTEXT_MODEL_TABLE_LENGTH];
 
-  int qPYPrime, qPCbPrime, qPCrPrime;
-
-  CABAC_decoder cabac_decoder;
-
-  context_model sao_merge_flag_model[3];
-  context_model sao_type_idx_model[3];
-  context_model split_flag_model[9];
-  context_model cu_skip_flag_model[6];
-  context_model part_mode_model[9];
-  context_model prev_intra_luma_pred_flag_model[3];
-  context_model intra_chroma_pred_mode_model[3];
-  context_model cbf_luma_model[8];
-  context_model cbf_chroma_model[12];
-  context_model split_transform_flag_model[9];
-  context_model last_significant_coefficient_x_prefix_model[54];
-  context_model last_significant_coefficient_y_prefix_model[54];
-  context_model coded_sub_block_flag_model[12];
-  context_model significant_coeff_flag_model[126];
-  context_model coeff_abs_level_greater1_flag_model[72];
-  context_model coeff_abs_level_greater2_flag_model[18];
-  context_model cu_qp_delta_abs_model[6];
-  context_model transform_skip_flag_model[6];
-  context_model merge_flag_model[2];
-  context_model merge_idx_model[2];
+  std::vector<int> RemoveReferencesList; // images that can be removed from the DPB before decoding this slice
 
 } slice_segment_header;
+
 
 
 typedef struct {
@@ -183,5 +257,32 @@ typedef struct {
   uint8_t sao_band_position[3];
   int8_t  saoOffsetVal[3][4]; // index with [][idx-1] as saoOffsetVal[][0]==0 always  
 } sao_info;
+
+
+
+
+de265_error read_slice_segment_data(struct thread_context* tctx);
+
+bool alloc_and_init_significant_coeff_ctxIdx_lookupTable();
+void free_significant_coeff_ctxIdx_lookupTable();
+
+
+class thread_task_ctb_row : public thread_task
+{
+public:
+  bool   firstSliceSubstream;
+  struct thread_context* tctx;
+
+  virtual void work();
+};
+
+class thread_task_slice_segment : public thread_task
+{
+public:
+  bool   firstSliceSubstream;
+  struct thread_context* tctx;
+
+  virtual void work();
+};
 
 #endif

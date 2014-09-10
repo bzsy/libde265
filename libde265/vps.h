@@ -1,6 +1,6 @@
 /*
  * H.265 video codec.
- * Copyright (c) 2013 StrukturAG, Dirk Farin, <farin@struktur.de>
+ * Copyright (c) 2013-2014 struktur AG, Dirk Farin <farin@struktur.de>
  *
  * This file is part of libde265.
  *
@@ -21,14 +21,24 @@
 #ifndef DE265_VPS_H
 #define DE265_VPS_H
 
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
+#ifdef HAVE_STDBOOL_H
 #include <stdbool.h>
+#endif
 
 #include "libde265/bitstream.h"
+#include "libde265/de265.h"
+
+#define MAX_TEMPORAL_SUBLAYERS 8
 
 
 struct profile_data {
+  // --- profile ---
+
   char sub_layer_profile_present_flag;
-  char sub_layer_level_present_flag;
 
   char sub_layer_profile_space;
   char sub_layer_tier_flag;
@@ -36,13 +46,20 @@ struct profile_data {
 
   char sub_layer_profile_compatibility_flag[32];
 
-  int sub_layer_level_idc;
+  char sub_layer_progressive_source_flag;
+  char sub_layer_interlaced_source_flag;
+  char sub_layer_non_packed_constraint_flag;
+  char sub_layer_frame_only_constraint_flag;
+
+
+  // --- level ---
+
+  char sub_layer_level_present_flag;
+  int  sub_layer_level_idc;
 };
 
 
 struct profile_tier_level {
-  bool ProfilePresentFlag;
-
   int general_profile_space;
   int general_tier_flag;
   int general_profile_idc;
@@ -56,18 +73,19 @@ struct profile_tier_level {
 
   int general_level_idc;
 
-  struct profile_data profile_data[8];
+  struct profile_data profile[MAX_TEMPORAL_SUBLAYERS];
 };
 
 
 void read_profile_tier_level(bitreader* reader,
                              struct profile_tier_level* hdr,
-                             bool profile_present, int max_sub_layers);
-
-void dump_profile_tier_level(struct profile_tier_level* hdr,
                              int max_sub_layers);
 
+void dump_profile_tier_level(const struct profile_tier_level* hdr,
+                             int max_sub_layers, FILE* fh);
 
+
+/*
 struct bit_rate_pic_rate_info {
   char bit_rate_info_present_flag[8];
   char pic_rate_info_present_flag[8];
@@ -88,7 +106,7 @@ void read_bit_rate_pic_rate_info(bitreader* reader,
 void dump_bit_rate_pic_rate_info(struct bit_rate_pic_rate_info* hdr,
                                  int TempLevelLow,
                                  int TempLevelHigh);
-
+*/
 
 
 typedef struct {
@@ -99,42 +117,39 @@ typedef struct {
 
 typedef struct {
   int video_parameter_set_id;
+  int vps_max_layers;
   int vps_max_sub_layers;
   int vps_temporal_id_nesting_flag;
   struct profile_tier_level profile_tier_level;
-  struct bit_rate_pic_rate_info bit_rate_pic_rate_info;
+  //struct bit_rate_pic_rate_info bit_rate_pic_rate_info;
   int vps_sub_layer_ordering_info_present_flag;
 
-  layer_data layer[32]; // TODO: how many ?
+  layer_data layer[MAX_TEMPORAL_SUBLAYERS];
 
+  uint8_t vps_max_layer_id;
+  int     vps_num_layer_sets;
+
+  char layer_id_included_flag[1024][64];
+
+  char     vps_timing_info_present_flag;
+  uint32_t vps_num_units_in_tick;
+  uint32_t vps_time_scale;
+  char     vps_poc_proportional_to_timing_flag;
+
+  int vps_num_ticks_poc_diff_one;
   int vps_num_hrd_parameters;
 
-  /*
-    for( opIdx = 0; opIdx < vps_num_hrd_parameters; opIdx++ ) {
+  uint16_t hrd_layer_set_idx[1024];
+  char     cprms_present_flag[1024];
 
-      if( opIdx > 0 )
+  // hrd_parameters(cprms_present_flag[i], vps_max_sub_layers-1)
 
-        operation_point_layer_id_flags(opIdx)
-
-          hrd_parameters(opIdx == 0, vps_max_sub_layers_minus1)
-
-          }
-  */
-
-  /*
-  vps_extension_flag
-  u(1)
-    if( vps_extension_flag )
-
-      while( more_rbsp_data() )
-
-        vps_extension_data_flag
-          u(1)
-  */
+  char vps_extension_flag;
 
 } video_parameter_set;
 
-void read_vps(bitreader* reader, video_parameter_set* vps);
-void dump_vps(video_parameter_set*);
+
+de265_error read_vps(struct decoder_context* ctx, bitreader* reader, video_parameter_set* vps);
+void dump_vps(video_parameter_set*, int fd);
 
 #endif
